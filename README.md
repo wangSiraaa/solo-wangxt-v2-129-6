@@ -54,7 +54,21 @@
   含首解）+ 指纹，全部只在本地。
 - `exportPuzzle()` 导出的题面 JSON 只含 `regions / givens / thermometers`
   （`kind: "puzzle"`），**不含** `solution / witness / lastCheck` 等任何答案层字段；
-  有单测断言导出对象的键集合。
+  导入也只白名单读取这三项，文件中夹带的答案、历史检查或私有批注会被忽略。
+
+## 导入先看差异，确认后才替换草稿
+
+导入题面时先沿用 `importPuzzle()` 的结构校验，通过后由 `diffPuzzles()` 比较：
+
+- 提示数字：按格区分新增、删除、修改；
+- 宫区归属：逐格列出旧宫/新宫；
+- 温度计：按路径比较新增、删除、修改。
+
+画布用绿/红/琥珀色高亮差异位置；此时不替换当前题面，画布编辑与检查按钮锁定。
+用户确认后才替换题面，旧检查指纹立即失效（结论复位为“未检查”），并自动保存当前
+IndexedDB 草稿；取消或结构校验失败则当前草稿字节不变，原草稿可继续编辑。
+有单测覆盖单格提示定位、非法温度计拒绝、取消不变与确认后结论失效。
+
 
 ## 内置样例（均经 Z3 双重 check 验证）
 
@@ -87,7 +101,7 @@ node scripts/gen-samples.mjs   # 生成不规则宫、最小化提示，双重 c
 ```bash
 npm install        # 会自动把 z3 的 wasm 产物复制到 public/vendor
 npm run dev        # 开发服务器（已带 COOP/COEP 头）
-npm test           # 21 个单测（含 Z3 对三类样例的判定）
+npm test           # 28 个单测（含 Z3 对三类样例的判定）
 npm run check      # svelte-check 类型检查
 npm run build      # 产出 dist/
 node scripts/serve.mjs dist   # 以 COOP/COEP 头本地预览

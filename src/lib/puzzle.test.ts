@@ -3,6 +3,7 @@ import {
   areOrthogonallyAdjacent,
   blankPuzzle,
   clonePuzzle,
+  diffPuzzles,
   exportPuzzle,
   importPuzzle,
   rc,
@@ -114,6 +115,70 @@ describe('validateStructure — 温度计自交/邻接/越界', () => {
       })
     );
     expect(issues).toEqual([]);
+  });
+});
+
+describe('diffPuzzles — 导入差异预览', () => {
+  it('只改一格提示时精确定位为修改', () => {
+    const current = p((x) => {
+      x.givens[10] = 3;
+      x.thermometers = [{ path: [rc(0, 0), rc(0, 1)] }];
+    });
+    const incoming = clonePuzzle(current);
+    incoming.givens[10] = 8;
+
+    const diff = diffPuzzles(current, incoming);
+    expect(diff.givens).toEqual([{ cell: 10, type: 'modified', before: 3, after: 8 }]);
+    expect(diff.regions).toEqual([]);
+    expect(diff.thermometers).toEqual([]);
+    expect(diff.modifiedCells).toEqual([10]);
+    expect(diff.addedCells).toEqual([]);
+    expect(diff.removedCells).toEqual([]);
+  });
+
+  it('区分提示新增/删除与宫区归属修改', () => {
+    const current = p((x) => {
+      x.givens[0] = 5;
+      x.regions[1] = 0;
+    });
+    const incoming = p((x) => {
+      x.givens[1] = 7;
+      x.regions[1] = 1;
+    });
+    // 手工保证两题结构均合法，仅比较差异本身
+    const fixed = clonePuzzle(incoming);
+    fixed.regions[1] = 1;
+    fixed.regions[3] = 0;
+
+    const diff = diffPuzzles(current, fixed);
+    expect(diff.givens).toContainEqual({ cell: 0, type: 'removed', before: 5, after: 0 });
+    expect(diff.givens).toContainEqual({ cell: 1, type: 'added', before: 0, after: 7 });
+    expect(diff.regions).toContainEqual({ cell: 1, type: 'modified', before: 0, after: 1 });
+    expect(diff.regions).toContainEqual({ cell: 3, type: 'modified', before: 1, after: 0 });
+    expect(diff.removedCells).toContain(0);
+    expect(diff.addedCells).toContain(1);
+  });
+
+  it('比较温度计路径的新增、删除和修改', () => {
+    const current = p((x) => {
+      x.thermometers = [
+        { path: [rc(0, 0), rc(0, 1)] },
+        { path: [rc(2, 0), rc(2, 1)] }
+      ];
+    });
+    const incoming = p((x) => {
+      x.thermometers = [
+        { path: [rc(0, 0), rc(0, 1)] },
+        { path: [rc(2, 0), rc(3, 0)] }
+      ];
+    });
+
+    const diff = diffPuzzles(current, incoming);
+    expect(diff.thermometers).toHaveLength(1);
+    expect(diff.thermometers[0].type).toBe('modified');
+    expect(diff.thermometers[0].beforePath).toEqual([rc(2, 0), rc(2, 1)]);
+    expect(diff.thermometers[0].afterPath).toEqual([rc(2, 0), rc(3, 0)]);
+    expect(diff.modifiedCells).toEqual(expect.arrayContaining([rc(2, 0), rc(2, 1), rc(3, 0)]));
   });
 });
 

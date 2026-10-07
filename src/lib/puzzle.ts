@@ -253,6 +253,144 @@ export function puzzleFingerprint(p: Puzzle): string {
   });
 }
 
+// ---------------------------------------------------------------------------
+// 导入差异预览
+// ---------------------------------------------------------------------------
+
+export type DiffChangeType = 'added' | 'removed' | 'modified';
+
+export interface GivenDiff {
+  cell: CellIndex;
+  type: DiffChangeType;
+  before: number;
+  after: number;
+}
+
+export interface RegionDiff {
+  cell: CellIndex;
+  type: DiffChangeType;
+  before: number;
+  after: number;
+}
+
+export interface ThermometerDiff {
+  type: DiffChangeType;
+  beforeIndex?: number;
+  afterIndex?: number;
+  beforePath: CellIndex[];
+  afterPath: CellIndex[];
+}
+
+export interface PuzzleDiff {
+  givens: GivenDiff[];
+  regions: RegionDiff[];
+  thermometers: ThermometerDiff[];
+  addedCells: CellIndex[];
+  removedCells: CellIndex[];
+  modifiedCells: CellIndex[];
+  hasChanges: boolean;
+}
+
+function samePath(a: CellIndex[], b: CellIndex[]): boolean {
+  return a.length === b.length && a.every((cell, i) => cell === b[i]);
+}
+
+function diffThermometers(current: Thermometer[], incoming: Thermometer[]): ThermometerDiff[] {
+  const remainingOld = current.map((t, index) => ({ path: t.path, index }));
+  const matchedOld = new Array<boolean>(current.length).fill(false);
+  const unmatchedIncoming: { path: CellIndex[]; index: number }[] = [];
+
+  for (let i = 0; i < incoming.length; i++) {
+    const path = incoming[i].path;
+    const oldPos = remainingOld.findIndex((item) => !matchedOld[item.index] && samePath(item.path, path));
+    if (oldPos >= 0) {
+      matchedOld[remainingOld[oldPos].index] = true;
+    } else {
+      unmatchedIncoming.push({ path, index: i });
+    }
+  }
+
+  const unmatchedOld = remainingOld.filter((item) => !matchedOld[item.index]);
+  const diffs: ThermometerDiff[] = [];
+  const modifiedCount = Math.min(unmatchedOld.length, unmatchedIncoming.length);
+
+  for (let i = 0; i < modifiedCount; i++) {
+    diffs.push({
+      type: 'modified',
+      beforeIndex: unmatchedOld[i].index,
+      afterIndex: unmatchedIncoming[i].index,
+      beforePath: unmatchedOld[i].path,
+      afterPath: unmatchedIncoming[i].path
+    });
+  }
+  for (let i = modifiedCount; i < unmatchedOld.length; i++) {
+    diffs.push({
+      type: 'removed',
+      beforeIndex: unmatchedOld[i].index,
+      beforePath: unmatchedOld[i].path,
+      afterPath: []
+    });
+  }
+  for (let i = modifiedCount; i < unmatchedIncoming.length; i++) {
+    diffs.push({
+      type: 'added',
+      afterIndex: unmatchedIncoming[i].index,
+      beforePath: [],
+      afterPath: unmatchedIncoming[i].path
+    });
+  }
+
+  return diffs;
+}
+
+/** 比较当前草稿与已通过结构校验的导入题面；不读取/比较任何答案层字段。 */
+export function diffPuzzles(current: Puzzle, incoming: Puzzle): PuzzleDiff {
+  const givens: GivenDiff[] = [];
+  const regions: RegionDiff[] = [];
+  const addedCells = new Set<CellIndex>();
+  const removedCells = new Set<CellIndex>();
+  const modifiedCells = new Set<CellIndex>();
+
+  for (let cell = 0; cell < CELL_COUNT; cell++) {
+    if (current.givens[cell] !== incoming.givens[cell]) {
+      const before = current.givens[cell];
+      const after = incoming.givens[cell];
+      const type: DiffChangeType = before === 0 ? 'added' : after === 0 ? 'removed' : 'modified';
+      givens.push({ cell, type, before, after });
+      if (type === 'added') addedCells.add(cell);
+      else if (type === 'removed') removedCells.add(cell);
+      else modifiedCells.add(cell);
+    }
+
+    if (current.regions[cell] !== incoming.regions[cell]) {
+      regions.push({
+        cell,
+        type: 'modified',
+        before: current.regions[cell],
+        after: incoming.regions[cell]
+      });
+      modifiedCells.add(cell);
+    }
+  }
+
+  const thermometers = diffThermometers(current.thermometers, incoming.thermometers);
+  for (const diff of thermometers) {
+    const target = diff.type === 'added' ? addedCells : diff.type === 'removed' ? removedCells : modifiedCells;
+    for (const cell of diff.type === 'removed' ? diff.beforePath : diff.afterPath) target.add(cell);
+    if (diff.type === 'modified') diff.beforePath.forEach((cell) => modifiedCells.add(cell));
+  }
+
+  return {
+    givens,
+    regions,
+    thermometers,
+    addedCells: [...addedCells],
+    removedCells: [...removedCells],
+    modifiedCells: [...modifiedCells],
+    hasChanges: givens.length > 0 || regions.length > 0 || thermometers.length > 0
+  };
+}
+
 /** 导出题面（公开数据）。明确剥离任何作者私有数据。 */
 export interface PuzzleExport {
   format: 'thermo-jigsaw-sudoku';

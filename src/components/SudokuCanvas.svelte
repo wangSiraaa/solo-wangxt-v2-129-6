@@ -1,6 +1,6 @@
 <script lang="ts">
   import { editor } from '../lib/state.svelte';
-  import { CELL_COUNT, N, colOf, rowOf, type CellIndex } from '../lib/puzzle';
+  import { CELL_COUNT, N, colOf, rowOf, type CellIndex, type Puzzle, type PuzzleDiff } from '../lib/puzzle';
 
   let canvas: HTMLCanvasElement;
   const CELL = 56; // CSS 像素/格
@@ -30,6 +30,7 @@
     void editor.tool;
     void editor.activeThermo;
     void editor.highlightCells;
+    void editor.importPreview;
     void editor.showSolution;
     void editor.analysis;
     void editor.selectedCell;
@@ -64,10 +65,14 @@
     }
 
     // 2) 高亮格（结构错误 / 矛盾核）
-    ctx.fillStyle = 'rgba(220, 38, 38, 0.22)';
-    editor.highlightCells.forEach((i) => {
-      ctx.fillRect(colOf(i) * CELL, rowOf(i) * CELL, CELL, CELL);
-    });
+    if (!editor.importPreview) {
+      ctx.fillStyle = 'rgba(220, 38, 38, 0.22)';
+      editor.highlightCells.forEach((i) => {
+        ctx.fillRect(colOf(i) * CELL, rowOf(i) * CELL, CELL, CELL);
+      });
+    } else {
+      drawImportCellHighlights(ctx, editor.importPreview.diff);
+    }
 
     // 悬停
     if (hover !== null) {
@@ -147,8 +152,10 @@
       }
     }
 
-    // 6) 解层（仅作者本地查看，不参与导出）
-    if (editor.showSolution && editor.analysis.result?.solution) {
+    if (editor.importPreview) drawImportOverlay(ctx, editor.importPreview);
+
+    // 6) 解层（仅作者本地查看，不参与导出；导入预览时不显示旧答案层）
+    if (!editor.importPreview && editor.showSolution && editor.analysis.result?.solution) {
       const sol = editor.analysis.result.solution;
       ctx.font = `500 ${CELL * 0.42}px ui-sans-serif, system-ui, sans-serif`;
       ctx.fillStyle = '#2563eb';
@@ -158,6 +165,93 @@
         ctx.fillText(String(sol[i]), cx, cy + 1);
       }
     }
+  }
+
+  type ImportPreview = { puzzle: Puzzle; diff: PuzzleDiff };
+
+  function drawImportCellHighlights(ctx2: CanvasRenderingContext2D, diff: PuzzleDiff) {
+    fillCells(ctx2, diff.addedCells, 'rgba(22, 163, 74, 0.23)');
+    fillCells(ctx2, diff.removedCells, 'rgba(220, 38, 38, 0.20)');
+    fillCells(ctx2, diff.modifiedCells, 'rgba(217, 119, 6, 0.24)');
+  }
+
+  function fillCells(ctx2: CanvasRenderingContext2D, cells: CellIndex[], color: string) {
+    ctx2.fillStyle = color;
+    cells.forEach((i) => ctx2.fillRect(colOf(i) * CELL, rowOf(i) * CELL, CELL, CELL));
+  }
+
+  function drawImportOverlay(ctx2: CanvasRenderingContext2D, preview: ImportPreview) {
+    const { diff } = preview;
+
+    // 宫区归属变化：琥珀色粗框定位到具体格
+    ctx2.lineWidth = 3;
+    ctx2.strokeStyle = '#d97706';
+    diff.regions.forEach(({ cell }) => {
+      ctx2.strokeRect(colOf(cell) * CELL + 2, rowOf(cell) * CELL + 2, CELL - 4, CELL - 4);
+    });
+
+    // 温度计路径：绿色=新增，红色=删除；修改时同时画旧路径与新路径
+    diff.thermometers.forEach((t) => {
+      if (t.type === 'removed') drawThermoPreview(ctx2, t.beforePath, '#dc2626', true);
+      else if (t.type === 'added') drawThermoPreview(ctx2, t.afterPath, '#16a34a', false);
+      else {
+        drawThermoPreview(ctx2, t.beforePath, '#dc2626', true);
+        drawThermoPreview(ctx2, t.afterPath, '#16a34a', false);
+      }
+    });
+
+    // 提示数字变化：新增/修改后的数字用绿色，删除的数字标红并划线
+    ctx2.textAlign = 'center';
+    ctx2.textBaseline = 'middle';
+    diff.givens.forEach(({ cell, type, before, after }) => {
+      const [cx, cy] = center(cell);
+      if (type === 'removed') {
+        ctx2.strokeStyle = '#dc2626';
+        ctx2.lineWidth = 3;
+        ctx2.beginPath();
+        ctx2.moveTo(cx - 13, cy - 13);
+        ctx2.lineTo(cx + 13, cy + 13);
+        ctx2.stroke();
+        ctx2.font = `700 ${CELL * 0.46}px ui-sans-serif, system-ui, sans-serif`;
+        ctx2.fillStyle = '#dc2626';
+        ctx2.fillText(String(before), cx - 8, cy - 8);
+      } else {
+        ctx2.fillStyle = 'rgba(255,255,255,0.78)';
+        ctx2.fillRect(colOf(cell) * CELL + 9, rowOf(cell) * CELL + 9, CELL - 18, CELL - 18);
+        ctx2.font = `700 ${CELL * 0.62}px ui-sans-serif, system-ui, sans-serif`;
+        ctx2.fillStyle = '#15803d';
+        ctx2.fillText(String(after), cx, cy + 1);
+        if (type === 'modified') {
+          ctx2.font = `600 ${CELL * 0.24}px ui-sans-serif, system-ui, sans-serif`;
+          ctx2.fillStyle = '#b91c1c';
+          ctx2.fillText(`${before}→`, cx - CELL * 0.24, cy + CELL * 0.31);
+        }
+      }
+    });
+  }
+
+  function drawThermoPreview(ctx2: CanvasRenderingContext2D, path: CellIndex[], color: string, dashed: boolean) {
+    if (!path.length) return;
+    ctx2.save();
+    ctx2.lineCap = 'round';
+    ctx2.lineJoin = 'round';
+    ctx2.setLineDash(dashed ? [7, 6] : []);
+    ctx2.strokeStyle = color;
+    ctx2.globalAlpha = 0.78;
+    ctx2.lineWidth = CELL * 0.34;
+    beginPathThrough(ctx2, path);
+    ctx2.stroke();
+    ctx2.globalAlpha = 1;
+    ctx2.lineWidth = CELL * 0.10;
+    ctx2.strokeStyle = '#fff';
+    beginPathThrough(ctx2, path);
+    ctx2.stroke();
+    const [bx, by] = center(path[0]);
+    ctx2.fillStyle = color;
+    ctx2.beginPath();
+    ctx2.arc(bx, by, CELL * 0.24, 0, Math.PI * 2);
+    ctx2.fill();
+    ctx2.restore();
   }
 
   function beginPathThrough(ctx2: CanvasRenderingContext2D, path: CellIndex[]) {
@@ -187,14 +281,14 @@
   let painting = false;
   function onDown(e: MouseEvent) {
     const cell = eventCell(e);
-    if (cell === null) return;
+    if (cell === null || editor.importPreview) return;
     painting = true;
     editor.onCellClick(cell);
   }
   function onMove(e: MouseEvent) {
     hover = eventCell(e);
-    // 宫区刷色支持拖动
-    if (painting && editor.tool === 'regions' && hover !== null) editor.onCellClick(hover);
+    // 宫区刷色支持拖动；导入待确认时锁定画布，避免误改当前草稿
+    if (painting && !editor.importPreview && editor.tool === 'regions' && hover !== null) editor.onCellClick(hover);
   }
   function onUp() {
     painting = false;

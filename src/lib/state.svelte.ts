@@ -1,11 +1,15 @@
 // 全局应用状态（Svelte 5 runes）。
 import {
   clonePuzzle,
+  diffPuzzles,
+  importPuzzle,
   puzzleFingerprint,
   validateStructure,
   type Puzzle,
+  type PuzzleDiff,
   type StructuralIssue
 } from './puzzle';
+import { persistEditorDraft } from './autosave';
 import type { SolveResult } from './solver';
 import { initZ3Api } from './z3-init';
 import type { Z3HighLevel } from 'z3-solver';
@@ -38,6 +42,8 @@ export class EditorState {
   timeoutMs = $state<number>(5000);
   /** 画布高亮的格子（结构错误 / 矛盾核） */
   highlightCells = $state<Set<number>>(new Set());
+  /** 已解析但尚未确认替换的导入差异；为 null 时画布不显示导入预览 */
+  importPreview = $state<{ puzzle: Puzzle; diff: PuzzleDiff } | null>(null);
   showSolution = $state<boolean>(false);
   /** 当前选中格（givens 工具下由数字键/数字盘写入） */
   selectedCell = $state<number | null>(null);
@@ -48,8 +54,63 @@ export class EditorState {
     this.puzzle = puzzle;
     this.draftId = draftId;
     this.draftName = name;
+    this.importPreview = null;
+    this.activeThermo = null;
+    this.highlightCells = new Set();
     this.revalidate();
     this.analysis = { status: 'idle', result: null, fingerprint: null, error: null };
+  }
+
+  /**
+   * 解析导入文件并生成差异预览。importPuzzle 只提取题面三件套，
+   * 文件里即使带有 solution / lastCheck / 私有批注等字段也会被忽略。
+   * 校验失败时抛错，当前草稿与已保存字节均不变。
+   */
+  prepareImport(data: unknown): PuzzleDiff {
+    let incoming: Puzzle;
+    try {
+      incoming = importPuzzle(data);
+    } catch (e) {
+      // 新文件非法时关闭旧预览，恢复当前草稿的直接编辑状态
+      this.importPreview = null;
+      throw e;
+    }
+    const diff = diffPuzzles(this.puzzle as Puzzle, incoming);
+    this.importPreview = { puzzle: incoming, diff };
+    return diff;
+  }
+
+  /**
+   * 确认导入：替换题面，旧指纹结论失效，并自动保存回当前草稿。
+   * 返回保存后的草稿 id；保存失败时错误抛给界面，当前题面仍已完成替换。
+   */
+  async confirmImport(): Promise<string | null> {
+    const preview = this.importPreview;
+    if (!preview) return null;
+    if (!preview.diff.hasChanges) {
+      this.importPreview = null;
+      return this.draftId;
+    }
+
+    this.puzzle = clonePuzzle(preview.puzzle);
+    this.importPreview = null;
+    this.activeThermo = null;
+    this.highlightCells = new Set();
+    this.showSolution = false;
+    this.revalidate();
+
+    const saved = await persistEditorDraft(
+      { id: this.draftId, name: this.draftName },
+      this.puzzle,
+      this.analysis
+    );
+    this.draftId = saved.id;
+    return saved.id;
+  }
+
+  /** 取消导入：只关闭差异预览，绝不改动当前草稿，也不触发保存。 */
+  cancelImport() {
+    this.importPreview = null;
   }
 
   async loadZ3() {
@@ -75,6 +136,8 @@ export class EditorState {
   }
 
   #mutate(fn: (p: Puzzle) => void) {
+    // 手动编辑当前题面时关闭任何待确认的导入预览，避免用户按旧差异确认
+    this.importPreview = null;
     const draft = clonePuzzle(this.puzzle as Puzzle);
     fn(draft);
     this.puzzle = draft;
@@ -156,6 +219,7 @@ export class EditorState {
 
   /** 画布点击入口，由当前工具决定行为 */
   onCellClick(cell: number) {
+    if (this.importPreview) return;
     switch (this.tool) {
       case 'regions':
         this.paintRegion(cell);
@@ -179,14 +243,14 @@ export class EditorState {
   }
 
   pressDigit(d: number) {
-    if (this.tool !== 'givens') return;
+    if (this.importPreview || this.tool !== 'givens') return;
     if (this.selectedCell === null) return;
     if (d === 0) this.clearCell(this.selectedCell);
     else this.setGiven(this.selectedCell, d);
   }
 
   async runCheck() {
-    if (!this.z3 || !this.#analyzePuzzle || this.analysis.status === 'checking') return;
+    if (this.importPreview || !this.z3 || !this.#analyzePuzzle || this.analysis.status === 'checking') return;
     this.analysis.status = 'checking';
     this.analysis.error = null;
     try {
