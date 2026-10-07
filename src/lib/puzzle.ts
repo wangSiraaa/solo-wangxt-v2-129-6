@@ -253,6 +253,160 @@ export function puzzleFingerprint(p: Puzzle): string {
   });
 }
 
+// ---------------------------------------------------------------------------
+// 导入差异预览：只比较提示数字、宫区归属、温度计路径三类题面要素
+// ---------------------------------------------------------------------------
+
+export type DiffKind = 'added' | 'removed' | 'modified';
+
+/** 提示数字差异（按格定位） */
+export interface GivenDiff {
+  kind: Exclude<DiffKind, 'added'> | 'added';
+  cell: CellIndex;
+  /** 0 表示空 */
+  before: number;
+  /** 0 表示空 */
+  after: number;
+}
+
+/** 宫区归属差异（按格定位） */
+export interface RegionDiff {
+  kind: 'modified';
+  cell: CellIndex;
+  before: number;
+  after: number;
+}
+
+export type ThermoDiffKind = 'added' | 'removed' | 'modified';
+
+/** 一支温度计的差异（温度计整体作为单位） */
+export interface ThermoDiff {
+  kind: ThermoDiffKind;
+  /** 当前草稿中的序号；新增时为 null */
+  beforeIndex: number | null;
+  /** 导入题面中的序号；删除时为 null */
+  afterIndex: number | null;
+  beforePath: CellIndex[];
+  afterPath: CellIndex[];
+}
+
+export interface PuzzleDiff {
+  givens: GivenDiff[];
+  regions: RegionDiff[];
+  thermometers: ThermoDiff[];
+  /** 所有受影响格子的并集（供画布高亮） */
+  cells: CellIndex[];
+  /** 受影响温度计序号（导入题面口径；删除项用草稿口径） */
+  addedCells: CellIndex[];
+  removedCells: CellIndex[];
+  modifiedCells: CellIndex[];
+  isEmpty: boolean;
+}
+
+function samePath(a: CellIndex[], b: CellIndex[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+/**
+ * 比较两份题面的提示数字、宫区归属与温度计路径。
+ * 温度计按"路径内容（含方向）"配对：内容相同视为未变；
+ * 修改的温度计按 bulb（路径首格）配对，避免温度计顺序调整导致整支误报删除+新增。
+ */
+export function diffPuzzles(before: Puzzle, after: Puzzle): PuzzleDiff {
+  const givens: GivenDiff[] = [];
+  const addedCells: CellIndex[] = [];
+  const removedCells: CellIndex[] = [];
+  const modifiedCells: CellIndex[] = [];
+
+  for (let i = 0; i < CELL_COUNT; i++) {
+    const g0 = before.givens[i] ?? 0;
+    const g1 = after.givens[i] ?? 0;
+    if (g0 === g1) continue;
+    const kind: GivenDiff['kind'] = g0 === 0 ? 'added' : g1 === 0 ? 'removed' : 'modified';
+    givens.push({ kind, cell: i, before: g0, after: g1 });
+    (kind === 'added' ? addedCells : kind === 'removed' ? removedCells : modifiedCells).push(i);
+  }
+
+  const regions: RegionDiff[] = [];
+  for (let i = 0; i < CELL_COUNT; i++) {
+    if (before.regions[i] !== after.regions[i]) {
+      regions.push({ kind: 'modified', cell: i, before: before.regions[i], after: after.regions[i] });
+      modifiedCells.push(i);
+    }
+  }
+
+  // 温度计配对：先按完整路径去重匹配，再按 bulb 匹配"修改"
+  const thermometers: ThermoDiff[] = [];
+  const afterUsed = new Array<boolean>(after.thermometers.length).fill(false);
+  const beforeMatched = new Array<boolean>(before.thermometers.length).fill(false);
+
+  before.thermometers.forEach((tb, bi) => {
+    const aj = after.thermometers.findIndex((ta, ai) => !afterUsed[ai] && samePath(tb.path, ta.path));
+    if (aj >= 0) {
+      beforeMatched[bi] = true;
+      afterUsed[aj] = true;
+    }
+  });
+  before.thermometers.forEach((tb, bi) => {
+    if (beforeMatched[bi]) return;
+    const aj = after.thermometers.findIndex(
+      (ta, ai) => !afterUsed[ai] && ta.path.length > 0 && tb.path.length > 0 && ta.path[0] === tb.path[0]
+    );
+    if (aj >= 0) {
+      beforeMatched[bi] = true;
+      afterUsed[aj] = true;
+      thermometers.push({
+        kind: 'modified',
+        beforeIndex: bi,
+        afterIndex: aj,
+        beforePath: [...tb.path],
+        afterPath: [...after.thermometers[aj].path]
+      });
+      modifiedCells.push(...tb.path, ...after.thermometers[aj].path);
+    }
+  });
+  before.thermometers.forEach((tb, bi) => {
+    if (beforeMatched[bi]) return;
+    thermometers.push({
+      kind: 'removed',
+      beforeIndex: bi,
+      afterIndex: null,
+      beforePath: [...tb.path],
+      afterPath: []
+    });
+    removedCells.push(...tb.path);
+  });
+  after.thermometers.forEach((ta, ai) => {
+    if (afterUsed[ai]) return;
+    thermometers.push({
+      kind: 'added',
+      beforeIndex: null,
+      afterIndex: ai,
+      beforePath: [],
+      afterPath: [...ta.path]
+    });
+    addedCells.push(...ta.path);
+  });
+
+  const cells = [...new Set<CellIndex>([...addedCells, ...removedCells, ...modifiedCells])].sort(
+    (a, b) => a - b
+  );
+  const added = [...new Set(addedCells)];
+  const removed = [...new Set(removedCells)];
+  const modified = [...new Set(modifiedCells)];
+
+  return {
+    givens,
+    regions,
+    thermometers,
+    cells,
+    addedCells: added,
+    removedCells: removed,
+    modifiedCells: modified,
+    isEmpty: givens.length === 0 && regions.length === 0 && thermometers.length === 0
+  };
+}
+
 /** 导出题面（公开数据）。明确剥离任何作者私有数据。 */
 export interface PuzzleExport {
   format: 'thermo-jigsaw-sudoku';

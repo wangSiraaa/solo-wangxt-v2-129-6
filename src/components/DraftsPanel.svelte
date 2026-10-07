@@ -19,6 +19,13 @@
   }
   refresh();
 
+  // 导入确认后的自动保存会推高 draftsVersion，此时刷新列表
+  const draftsTick = $derived(editor.draftsVersion);
+  $effect(() => {
+    void draftsTick;
+    refresh();
+  });
+
   async function save() {
     busy = true;
     try {

@@ -3,6 +3,7 @@ import {
   areOrthogonallyAdjacent,
   blankPuzzle,
   clonePuzzle,
+  diffPuzzles,
   exportPuzzle,
   importPuzzle,
   rc,
@@ -140,5 +141,119 @@ describe('导出不泄露答案层', () => {
     expect(back.givens).toEqual(x.givens);
     expect(back.thermometers).toEqual(x.thermometers);
     expect(back.regions).toEqual(x.regions);
+  });
+
+  it('非法温度计（自交 + 跨步）导入被拒绝', () => {
+    const bad = {
+      ...exportPuzzle(blankPuzzle()),
+      thermometers: [{ path: [rc(0, 0), rc(0, 2), rc(0, 0)] }]
+    };
+    expect(() => importPuzzle(bad)).toThrow(/结构不合法/);
+  });
+});
+
+describe('导入文件不得携带答案层 / 私有状态', () => {
+  it('文件里的 solution / witness / lastCheck / 批注字段被忽略', () => {
+    const poisoned = {
+      ...exportPuzzle(blankPuzzle()),
+      solution: new Array(81).fill(9),
+      witness: new Array(81).fill(1),
+      lastCheck: { verdict: 'unique' },
+      checkFingerprint: 'forged',
+      notes: '同事的私有批注',
+      comments: ['历史检查记录']
+    };
+    const back = importPuzzle(poisoned as unknown) as Puzzle & Record<string, unknown>;
+    expect(back).not.toHaveProperty('solution');
+    expect(back).not.toHaveProperty('witness');
+    expect(back).not.toHaveProperty('lastCheck');
+    expect(back).not.toHaveProperty('checkFingerprint');
+    expect(back).not.toHaveProperty('notes');
+    expect(Object.keys(back).sort()).toEqual(['givens', 'regions', 'thermometers', 'version'].sort());
+  });
+});
+
+describe('diffPuzzles — 导入差异预览', () => {
+  it('相同题面差异为空', () => {
+    const x = blankPuzzle();
+    x.givens[0] = 5;
+    x.thermometers = [{ path: [rc(0, 0), rc(0, 1)] }];
+    const d = diffPuzzles(clonePuzzle(x), clonePuzzle(x));
+    expect(d.isEmpty).toBe(true);
+    expect(d.cells).toEqual([]);
+  });
+
+  it('只改一格提示时精确定位该格（修改/新增/删除三类）', () => {
+    const before = blankPuzzle();
+    before.givens[10] = 3;
+    before.givens[11] = 7;
+
+    const after = blankPuzzle();
+    after.givens[10] = 8; // 修改
+    after.givens[11] = 7; // 不变
+    after.givens[20] = 2; // 新增
+    // 11 保持；删除：after.givens[30] 保持 0，before 放一个
+    before.givens[30] = 9;
+
+    const d = diffPuzzles(before, after);
+    expect(d.givens.map((g) => g.cell).sort((a, b) => a - b)).toEqual([10, 20, 30]);
+    expect(d.regions).toEqual([]);
+    expect(d.thermometers).toEqual([]);
+    expect([...d.cells].sort((a, b) => a - b)).toEqual([10, 20, 30]); // 精确：仅这三格
+
+    const mod = d.givens.find((g) => g.cell === 10)!;
+    expect(mod.kind).toBe('modified');
+    expect([mod.before, mod.after]).toEqual([3, 8]);
+    const add = d.givens.find((g) => g.cell === 20)!;
+    expect(add.kind).toBe('added');
+    const rm = d.givens.find((g) => g.cell === 30)!;
+    expect(rm.kind).toBe('removed');
+  });
+
+  it('宫区归属变化按格报告旧/新宫号', () => {
+    const before = blankPuzzle();
+    const after = blankPuzzle();
+    after.regions[40] = 7;
+    after.regions[41] = 7;
+    const d = diffPuzzles(before, after);
+    expect(d.regions.map((r) => r.cell)).toEqual([40, 41]);
+    expect(d.regions[0]).toMatchObject({ kind: 'modified', before: before.regions[40], after: 7 });
+    expect(d.modifiedCells).toContain(40);
+  });
+
+  it('温度计新增/删除/路径修改分别识别', () => {
+    const before = blankPuzzle();
+    before.thermometers = [
+      { path: [rc(0, 0), rc(0, 1)] }, // 会被修改（同 bulb）
+      { path: [rc(2, 2), rc(2, 3)] } // 会被删除
+    ];
+    const after = blankPuzzle();
+    after.thermometers = [
+      { path: [rc(0, 0), rc(0, 1), rc(0, 2)] }, // 修改
+      { path: [rc(4, 4), rc(4, 5)] } // 新增
+    ];
+    const d = diffPuzzles(before, after);
+    const kinds = d.thermometers.map((t) => t.kind).sort();
+    expect(kinds).toEqual(['added', 'modified', 'removed']);
+    const mod = d.thermometers.find((t) => t.kind === 'modified')!;
+    expect(mod.beforePath).toEqual([rc(0, 0), rc(0, 1)]);
+    expect(mod.afterPath).toEqual([rc(0, 0), rc(0, 1), rc(0, 2)]);
+    // 修改温度计的旧格/新格都进入高亮
+    expect(d.modifiedCells).toContain(rc(0, 2));
+  });
+
+  it('温度计仅顺序调整（路径不变）不算差异', () => {
+    const before = blankPuzzle();
+    before.thermometers = [
+      { path: [rc(0, 0), rc(0, 1)] },
+      { path: [rc(2, 2), rc(2, 3)] }
+    ];
+    const after = blankPuzzle();
+    after.thermometers = [
+      { path: [rc(2, 2), rc(2, 3)] },
+      { path: [rc(0, 0), rc(0, 1)] }
+    ];
+    const d = diffPuzzles(before, after);
+    expect(d.thermometers).toEqual([]);
   });
 });

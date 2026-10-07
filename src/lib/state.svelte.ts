@@ -1,14 +1,18 @@
 // 全局应用状态（Svelte 5 runes）。
 import {
   clonePuzzle,
+  diffPuzzles,
+  importPuzzle,
   puzzleFingerprint,
   validateStructure,
   type Puzzle,
+  type PuzzleDiff,
   type StructuralIssue
 } from './puzzle';
 import type { SolveResult } from './solver';
 import { initZ3Api } from './z3-init';
 import type { Z3HighLevel } from 'z3-solver';
+import { draftFromPuzzle, loadDraft, saveDraft } from './storage';
 
 export type Tool = 'givens' | 'regions' | 'thermo-start' | 'thermo-extend' | 'erase';
 
@@ -18,6 +22,21 @@ export interface AnalysisState {
   /** 该结论对应的题面指纹 */
   fingerprint: string | null;
   error: string | null;
+}
+
+/** 一次待确认的导入：解析通过的新题面 + 与当前草稿的差异 */
+export interface ImportPreviewState {
+  /** 经结构校验的导入题面（尚未替换当前草稿） */
+  puzzle: Puzzle;
+  diff: PuzzleDiff;
+}
+
+export type AutosaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+
+export interface AutosaveState {
+  status: AutosaveStatus;
+  message: string;
+  at: number | null;
 }
 
 export class EditorState {
@@ -41,6 +60,14 @@ export class EditorState {
   showSolution = $state<boolean>(false);
   /** 当前选中格（givens 工具下由数字键/数字盘写入） */
   selectedCell = $state<number | null>(null);
+  /** 导入差异预览：非 null 时画布显示差异高亮，草稿尚未被替换 */
+  importPreview = $state<ImportPreviewState | null>(null);
+  /** 确认导入后的自动保存状态 */
+  autosave = $state<AutosaveState>({ status: 'idle', message: '', at: null });
+  /** 草稿列表版本号：自动保存后自增，供题稿面板刷新 */
+  draftsVersion = $state<number>(0);
+  /** 进入预览前的画布高亮，取消时还原 */
+  #highlightBeforePreview: Set<number> | null = null;
 
   #analyzePuzzle: typeof import('./solver').analyzePuzzle | null = null;
 
@@ -50,6 +77,91 @@ export class EditorState {
     this.draftName = name;
     this.revalidate();
     this.analysis = { status: 'idle', result: null, fingerprint: null, error: null };
+  }
+
+  /**
+   * 解析并结构校验导入数据，生成与当前草稿的差异预览。
+   * 不改动当前草稿：非法题面抛错，画布上仍是原草稿，可继续编辑。
+   * 导入文件只允许携带题面层（regions/givens/thermometers），
+   * solution/witness/lastCheck/私有批注等字段一律忽略（importPuzzle 白名单读取）。
+   */
+  previewImport(data: unknown): ImportPreviewState {
+    const candidate = importPuzzle(data);
+    const diff = diffPuzzles(this.puzzle as Puzzle, candidate);
+    this.#highlightBeforePreview = this.highlightCells;
+    this.importPreview = { puzzle: candidate, diff };
+    // 预览期间清掉旧的错误/矛盾核高亮，差异高亮接管画布
+    this.highlightCells = new Set();
+    return this.importPreview;
+  }
+
+  /**
+   * 确认导入：用预览题面替换当前草稿。
+   * 指纹必然变化（差异非空）→ revalidate 使旧"唯一解"结论失效为"未检查"；
+   * 随后自动保存为新的本地题稿。差异为空时不替换、不失效、不保存。
+   */
+  async confirmImport(): Promise<void> {
+    const preview = this.importPreview;
+    if (!preview) return;
+    if (!preview.diff.isEmpty) {
+      this.puzzle = clonePuzzle(preview.puzzle);
+      this.draftId = null; // 导入即新稿，不覆盖旧草稿记录
+      if (!this.draftName || this.draftName === '未命名题稿') this.draftName = '导入的题面';
+      this.activeThermo = null;
+      this.showSolution = false;
+      this.revalidate(); // 结构校验 + 指纹比对：旧结论复位为未检查
+    }
+    this.importPreview = null;
+    this.highlightCells = new Set();
+    this.#highlightBeforePreview = null;
+    if (!preview.diff.isEmpty) await this.#autosave();
+  }
+
+  /** 取消导入：草稿一个字节都不变（连检查结论/高亮也恢复原样） */
+  cancelImport() {
+    this.importPreview = null;
+    if (this.#highlightBeforePreview) {
+      this.highlightCells = this.#highlightBeforePreview;
+      this.#highlightBeforePreview = null;
+    }
+  }
+
+  /** 题面确认替换后的自动保存（只写本地 IndexedDB；导出仍不带答案层） */
+  async #autosave(): Promise<void> {
+    if (typeof indexedDB === 'undefined') return; // 测试环境无 IndexedDB
+    this.autosave = { status: 'saving', message: '导入后自动保存中…', at: null };
+    try {
+      const fp = puzzleFingerprint(this.puzzle as Puzzle);
+      let id = this.draftId;
+      if (!id) {
+        const rec = draftFromPuzzle(this.draftName, this.puzzle as Puzzle);
+        rec.lastCheck = this.analysis.result;
+        rec.checkFingerprint = this.analysis.status === 'done' ? fp : null;
+        await saveDraft(rec);
+        id = rec.id;
+        this.draftId = id;
+      } else {
+        const existing = (await loadDraft(id)) ?? draftFromPuzzle(this.draftName, this.puzzle as Puzzle);
+        existing.name = this.draftName;
+        existing.updatedAt = Date.now();
+        existing.puzzle = structuredClone(this.puzzle);
+        existing.lastCheck = this.analysis.result;
+        existing.checkFingerprint = this.analysis.status === 'done' ? fp : null;
+        await saveDraft(existing);
+      }
+      this.autosave = {
+        status: 'saved',
+        message: `已自动保存为本地题稿「${this.draftName}」`,
+        at: Date.now()
+      };
+      this.draftsVersion++;
+    } catch (e) {
+      this.autosave = {
+        status: 'error',
+        message: '自动保存失败：' + (e instanceof Error ? e.message : String(e)),
+        at: Date.now()
+      };
+    }
   }
 
   async loadZ3() {
@@ -75,6 +187,8 @@ export class EditorState {
   }
 
   #mutate(fn: (p: Puzzle) => void) {
+    // 导入差异预览待确认期间，冻结对当前草稿的一切编辑
+    if (this.importPreview) return;
     const draft = clonePuzzle(this.puzzle as Puzzle);
     fn(draft);
     this.puzzle = draft;
